@@ -337,9 +337,10 @@ def CityNavAgent(scene_id, split, data_dir="./data", max_step_size=200, vlm_name
     # load LLM
     llm = OpenAI_LLM_v2(
         max_tokens=10000,
-        model_name="gpt-4o",
-        api_key="your api key",
+        model_name="qwen3-max-2026-01-23",
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
         client_type="openai",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         cache_name="navigation",
         finish_reasons=["stop", "length"],
     )
@@ -480,7 +481,7 @@ def CityNavAgent(scene_id, split, data_dir="./data", max_step_size=200, vlm_name
 
                 rest_walks = action_traj[:rest_steps]
 
-                data_dict['pred_traj'].extend(rest_walks)
+                data_dict['pred_traj'].extend([walk[:3] for walk in rest_walks])
                 data_dict['pred_traj_memory'].extend(rest_walks)
 
                 stop_pos = rest_walks[-1][:3]
@@ -679,7 +680,7 @@ def make_demo_video(data_root, env_id, episode_id):
 if __name__ == '__main__':
     env_id = 3
     split = "val_seen"
-    save_demo = False
+    save_demo = True
 
     # 1. record path; 2. replay the path; 3. make demo video
     CityNavAgent(env_id, split, max_step_size=60, vlm_name="sam", record=save_demo)

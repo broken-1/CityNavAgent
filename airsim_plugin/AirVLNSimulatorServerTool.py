@@ -594,8 +594,7 @@ if __name__ == '__main__':
     PORT = int(args.port)
 
     CWD_DIR = Path(str(os.getcwd())).resolve()
-    PROJECT_ROOT_DIR = CWD_DIR.parent / 'AirVLN-main'
-    SEARCH_ENVs_PATH = PROJECT_ROOT_DIR / 'ENVs'
+    SEARCH_ENVs_PATH = CWD_DIR.parent / 'ENVs'
     assert os.path.exists(str(SEARCH_ENVs_PATH)), 'error'
 
     gpu_list = []

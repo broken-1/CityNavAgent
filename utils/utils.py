@@ -10,7 +10,7 @@ import math
 import numpy as np
 
 from src.common.param import args
-from maps import compute_shortest_path
+from utils.maps import compute_shortest_path
 
 
 def to_eularian_angles(xyzw):
@@ -204,6 +204,10 @@ def calculate_movement_steps(A, B, h_ss=5.0, v_ss=2.0, yaw_ss=15):
             A_ori = np.array(A[3:6])
         elif len(A) > 6:
             A_ori = to_eularian_angles(A[3:7])
+        elif len(A) == 3:
+            del_pos = np.array(B[:3]) - A_pos
+            A_yaw = compute_airsim_yaw(del_pos[0], del_pos[1])
+            A_ori = [0, 0, A_yaw]
         else:
             raise ValueError(f"invalid orientation: {A}")
     else:

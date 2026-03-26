@@ -4,12 +4,12 @@ import numpy as np
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import optimal_route
-import landmark_extraction
 
 
 def full_pipeline(graph, start_node, landmarks = None, instructions = None, alpha=0.0002, debug=True):
     if landmarks is None:
         assert instructions is not None, "If landmarks is not provided, instructions must be provided"
+        import landmark_extraction
         landmarks = landmark_extraction.text_to_landmarks_gpt3(instructions)
 
     walk_and_metadata = optimal_route.find_optimal_route(

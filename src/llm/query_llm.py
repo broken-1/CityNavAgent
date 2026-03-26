@@ -230,11 +230,13 @@ class OpenAI_LLM_v1(LLM):
 
 class OpenAI_LLM_v2(LLM):
     def __init__(self, model_name, api_key, client_type="openai", logit_bias=None, max_tokens=64, finish_reasons=None, **kwargs):
+        base_url = kwargs.pop("base_url", None)
 
         if client_type == "openai":
-            self.client = OpenAI(
-                api_key=api_key,
-            )
+            client_kwargs = {"api_key": api_key}
+            if base_url is not None:
+                client_kwargs["base_url"] = base_url
+            self.client = OpenAI(**client_kwargs)
         elif client_type == "Azure":
             self.client = AzureOpenAI(
                 api_key=api_key,
@@ -280,7 +282,7 @@ class OpenAI_LLM_v2(LLM):
                         "content": content_block
                     }
                 ],
-                model="gpt-4o",
+                model=self.model_name,
             )
 
             message = completion.choices[0].message
@@ -328,7 +330,7 @@ class OpenAI_LLM_v2(LLM):
                 messages=[
                     query_messages
                 ],
-                model="gpt-4o",
+                model=self.model_name,
             )
 
             message = completion.choices[0].message
