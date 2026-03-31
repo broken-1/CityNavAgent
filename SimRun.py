@@ -6,6 +6,7 @@ import pickle
 import numpy as np
 import cv2
 import os
+import warnings
 
 from PIL import Image
 from tqdm import tqdm
@@ -33,6 +34,19 @@ from scipy.spatial.transform import Rotation as R
 from evaluator.nav_evaluator import CityNavEvaluator
 
 from airsim_plugin.AirVLNSimulatorClientTool import AirVLNSimulatorClientTool
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"The `device` argument is deprecated and will be removed in v5 of Transformers\."
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"torch\.utils\.checkpoint: please pass in use_reentrant=True or use_reentrant=False explicitly\..*"
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"None of the inputs have requires_grad=True\. Gradients will be None"
+)
 
 
 def convert_airsim_pose(pose):
@@ -149,7 +163,9 @@ def explore_pipeline_by_dino(
     observed_obj = set()
     caption_prompt = landmark_caption_prompt_builder(scene_objects)
     for img_p in image_path:
+        print(f"✔ LLM request: caption prompt -> {img_p}")
         caption_res_str = llm.query_api(caption_prompt, image_path=img_p, show_response=False)
+        print(f"✔ LLM response: caption -> {caption_res_str[:200]}")
         obs_strs = caption_res_str.split(".")
         for o in obs_strs:
             if o.strip(" ") not in observed_obj:
@@ -157,7 +173,9 @@ def explore_pipeline_by_dino(
     obs_obj_str = ".".join(list(observed_obj))
     time1 = time.time()
     route_predict_prompt = route_planning_prompt_builder(obs_obj_str, navigation_instruction, landmarks_route[0])
+    print("✔ LLM request: route planning")
     route_predicted = llm.query_api(route_predict_prompt, show_response=False)
+    print(f"✔ LLM response: route planning -> {route_predicted[:200]}")
 
     # print(f"query time: {time.time()-time1}")
     print("route_predict_prompt: ", route_predict_prompt)
@@ -251,7 +269,9 @@ def explore_pipeline_by_sam(
 
     traversed_landmarks = landmarks_route[:next_landmark_idx]
     route_predict_prompt = route_planning_prompt_builder(navigation_instruction, landmarks_route, traversed_landmarks, landmarks_route[next_landmark_idx])
+    print("✔ LLM request: viewpoint planning")
     route_predicted = llm.query_viewpoint_api(route_predict_prompt, viewpoint_img_path, show_response=False)
+    print(f"✔ LLM response: viewpoint planning -> {route_predicted[:200]}")
     route_predicted_dict = parse_viewpoint_response_v2(route_predicted)
 
     if route_predicted_dict["is_found"]:
@@ -337,7 +357,7 @@ def CityNavAgent(scene_id, split, data_dir="./data", max_step_size=200, vlm_name
     # load LLM
     llm = OpenAI_LLM_v2(
         max_tokens=10000,
-        model_name="qwen3-max-2026-01-23",
+        model_name="qwen3.5-plus",
         api_key=os.getenv("DASHSCOPE_API_KEY"),
         client_type="openai",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -565,6 +585,7 @@ def CityNavAgent(scene_id, split, data_dir="./data", max_step_size=200, vlm_name
                 final_traj.extend(mid_coords)
 
                 pr.update({'final_pred_traj': final_traj})
+            os.makedirs('output', exist_ok=True)
             with open(f'output/output_data_{env_id}.json', 'w') as f:
                 json.dump(predict_routes, f, indent=4)
 
@@ -685,5 +706,12 @@ if __name__ == '__main__':
     # 1. record path; 2. replay the path; 3. make demo video
     CityNavAgent(env_id, split, max_step_size=60, vlm_name="sam", record=save_demo)
     if save_demo:
-        replay_path(f"./output/output_data_{env_id}.json", env_id, img_type='rgb')
-        make_demo_video('./output/video', env_id=env_id, episode_id='3IRIK4HM3JIZ640FRHTYZU0EJ9Y6CH')
+        output_data_path = f"./output/output_data_{env_id}.json"
+        replay_path(output_data_path, env_id, img_type='rgb')
+
+        with open(output_data_path, 'r') as f:
+            output_trajs = json.load(f)
+
+        for out_traj in output_trajs:
+            if out_traj.get('success'):
+                make_demo_video('./output/video', env_id=env_id, episode_id=out_traj['episode_id'])

@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import unicodedata
 import time
 
@@ -21,6 +22,34 @@ from evaluator.nav_evaluator import CityNavEvaluator
 from airsim_plugin.AirVLNSimulatorClientTool import AirVLNSimulatorClientTool
 
 
+def load_navigation_tasks(split, data_dir):
+    split_path = os.path.join(data_dir, f"{split}.json")
+    if not os.path.exists(split_path):
+        raise FileNotFoundError(f"Cannot find navigation data: {split_path}")
+
+    with open(split_path, 'r') as f:
+        payload = json.load(f)
+
+    episodes = payload.get('episodes')
+    if episodes is None:
+        raise KeyError(f"Missing 'episodes' in navigation data: {split_path}")
+
+    for episode in episodes:
+        if 'scene_id' not in episode:
+            raise KeyError("Episode is missing scene_id while running in multi-scene mode")
+
+    return episodes
+
+def build_single_scene_machines_info(scene_id):
+    return [
+        {
+            'MACHINE_IP': '127.0.0.1',
+            'SOCKET_PORT': 30000,
+            'MAX_SCENE_NUM': 8,
+            'open_scenes': [scene_id],
+        },
+    ]
+
 def convert_airsim_pose(pose):
     assert len(pose) == 7, "The length of input pose must be 7"
     formatted_airsim_pose = airsim.Pose(
@@ -38,42 +67,6 @@ def convert_airsim_pose(pose):
     )
     return formatted_airsim_pose
 
-
-ACTION_NAMES = list(DefaultAirsimActionCodes.keys())
-STOP_ACTION = "STOP"
-ARRIVAL_KEYWORDS = [
-    "found",
-    "reached",
-    "arrived",
-    "close",
-    "visible",
-    "next to",
-    "at the",
-]
-
-
-def normalize_action_name(action_text):
-    if action_text is None:
-        return None
-    normalized = unicodedata.normalize("NFKC", str(action_text)).strip().upper()
-    normalized = re.sub(r"[\s\-]+", "_", normalized)
-    if normalized in DefaultAirsimActionCodes:
-        return normalized
-    return None
-
-
-ACTION_PATTERNS = [
-    (
-        re.compile(
-            r"\b" + re.escape(action_name).replace("_", r"[\s_\-]*") + r"\b",
-            re.IGNORECASE,
-        ),
-        action_name,
-    )
-    for action_name in sorted(ACTION_NAMES, key=len, reverse=True)
-]
-
-
 def parse_action_response(raw_text):
     cleaned_text = raw_text.strip()
     cleaned_text = re.sub(r"^```(?:json)?\s*", "", cleaned_text)
@@ -81,74 +74,53 @@ def parse_action_response(raw_text):
 
     action_name = None
     reason = ""
+
     try:
         payload = json.loads(cleaned_text)
-        action_name = normalize_action_name(payload.get("action"))
+        action_text = payload.get("action")
+        if action_text is not None:
+            normalized = unicodedata.normalize("NFKC", str(action_text)).strip().upper()
+            normalized = re.sub(r"[\s\-]+", "_", normalized)
+            if normalized in DefaultAirsimActionCodes:
+                action_name = normalized
         reason = str(payload.get("reason", "")).strip()
     except Exception:
-        payload = None
+        pass
 
     if not action_name:
-        for pattern, candidate in ACTION_PATTERNS:
-            if pattern.search(cleaned_text):
+        action_names = sorted(DefaultAirsimActionCodes.keys(), key=len, reverse=True)
+        for candidate in action_names:
+            pattern = r"\b" + re.escape(candidate).replace("_", r"[\s_\-]*") + r"\b"
+            if re.search(pattern, cleaned_text, re.IGNORECASE):
                 action_name = candidate
                 break
 
     if not action_name:
-        action_name = STOP_ACTION
-        reason = f"Failed to parse model response: {cleaned_text}"
+        action_name = "STOP"
+        reason = f"[PARSE_FAILED] fallback to STOP. cleaned_response={cleaned_text}"
     elif not reason:
         reason = cleaned_text
 
     return action_name, reason, cleaned_text
 
-
-def should_advance_landmark(reason, current_landmark, landmark_step_count, max_landmark_steps=5):
-    normalized_reason = unicodedata.normalize("NFKC", reason).lower()
-    landmark_text = current_landmark.lower()
-    if landmark_text in normalized_reason and any(keyword in normalized_reason for keyword in ARRIVAL_KEYWORDS):
-        return True
-    if landmark_step_count >= max_landmark_steps:
-        return True
-    return False
-
-
-def build_qwen_action_prompt(
-        instruction_text,
-        landmarks,
-        traversed_landmarks,
-        next_landmark,
-        current_pose,
-        recent_actions,
-):
-    altitude = -float(current_pose.position.z_val)
-    action_space = ", ".join(ACTION_NAMES)
-    traversed_text = ", ".join(traversed_landmarks) if traversed_landmarks else "NONE"
-    landmarks_text = ", ".join(landmarks)
-    recent_action_text = ", ".join(recent_actions) if recent_actions else "NONE"
+def build_qwen_action_prompt(instruction_text):
+    action_space = ", ".join(DefaultAirsimActionCodes.keys())
 
     prompt = f"""
-You are an AI agent helping to control a drone to finish an aerial navigation task.
+You are a drone that is currently executing an aerial navigation task.
+You will make one navigation decision at a time and continue iterating until the task is finished.
 
 Navigation instruction:
 {instruction_text}
 
-All landmarks in order:
-{landmarks_text}
+Your visual observations from different viewpoints are provided above: left, slightly left, front, slightly right, right.
+Based on the navigation instruction and multi-view observations, plan the single best next action.
+Use the images to decide what helps the drone move closer to the target location.
+Do not treat the instruction as a script to complete in one step.
+Only output STOP when the destination is clearly reached and further movement would overshoot or be unnecessary.
+If there is any reasonable next move that would improve alignment or get the drone closer, choose that move instead of STOP.
 
-Traversed landmarks:
-{traversed_text}
-
-Current next landmark:
-{next_landmark}
-
-You are given five images from different viewpoints: left, slightly left, front, slightly right, right.
-Your current altitude is {altitude:.2f} meters.
-Your recent actions are: {recent_action_text}
-
-Focus only on reaching or getting closer to the current next landmark.
-Do not execute the instruction as a full script in one step.
-Choose exactly one next action from:
+Choose exactly one next action from this action space:
 {action_space}
 
 Return JSON only:
@@ -156,90 +128,74 @@ Return JSON only:
 """.strip()
     return prompt
 
-
-def query_qwen_action(
-        llm,
-        instruction_text,
-        landmarks,
-        next_landmark_idx,
-        current_pose,
+def query_qwen_action(llm, instruction_text, viewpoint_img_path, message_history):
+    prompt = build_qwen_action_prompt(instruction_text)
+    raw_response, updated_message_history = llm.query_viewpoint_api(
+        prompt,
         viewpoint_img_path,
-        action_history,
-):
-    traversed_landmarks = landmarks[:next_landmark_idx]
-    next_landmark = landmarks[min(next_landmark_idx, len(landmarks) - 1)]
-    prompt = build_qwen_action_prompt(
-        instruction_text,
-        landmarks,
-        traversed_landmarks,
-        next_landmark,
-        current_pose,
-        action_history[-5:],
+        message_history=message_history,
+        show_response=False,
+        return_message_history=True,
     )
-    raw_response = llm.query_viewpoint_api(prompt, viewpoint_img_path, show_response=False)
     action_name, reason, cleaned_response = parse_action_response(raw_response)
-    return action_name, reason, cleaned_response
+    return action_name, reason, cleaned_response, updated_message_history
 
-
-def CityNavAgentMCTS(scene_id, split, data_dir="./data", max_step_size=200, record=False):
-    data_root = os.path.join(data_dir, f"gt_by_env/{scene_id}/{split}_landmk.json")
-
+def CityNavAgentMCTS(split, data_dir, max_step_size, record, model_name, max_episodes=0):
     os.makedirs("obs_imgs", exist_ok=True)
 
     predict_routes = []
-    with open(data_root, 'r') as f:
-        navi_tasks = json.load(f)['episodes']
+    navi_tasks = load_navigation_tasks(split, data_dir)
+    if max_episodes and max_episodes > 0:
+        navi_tasks = navi_tasks[:max_episodes]
 
     nav_evaluator = CityNavEvaluator()
 
     llm = OpenAI_LLM_v2(
         max_tokens=10000,
-        model_name="qwen3-max-2026-01-23",
+        model_name=model_name,
         api_key=os.getenv("DASHSCOPE_API_KEY"),
         client_type="openai",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        enable_thinking=False,
         cache_name="navigation_mcts",
-        finish_reasons=["stop", "length"],
     )
 
-    machines_info_xxx = [
-        {
-            'MACHINE_IP': '127.0.0.1',
-            'SOCKET_PORT': 30000,
-            'MAX_SCENE_NUM': 8,
-            'open_scenes': [scene_id],
-        },
-    ]
-
-    tool = AirVLNSimulatorClientTool(machines_info=machines_info_xxx)
-    tool.run_call()
+    tool = None
+    active_scene_id = None
 
     for i in tqdm(range(len(navi_tasks))):
         navi_task = navi_tasks[i]
         episode_id = navi_task['episode_id']
-        print(f"================================ Start episode {episode_id} ==================================")
+        episode_scene_id = int(navi_task['scene_id'])
+        curr_pose = convert_airsim_pose(
+            navi_task["start_position"] + navi_task["start_rotation"][1:] + [navi_task["start_rotation"][0]]
+        )
 
-        landmarks = navi_task["instruction"]["landmarks"]
-        if len(landmarks) == 0:
-            continue
+        if tool is None:
+            tool = AirVLNSimulatorClientTool(machines_info=build_single_scene_machines_info(episode_scene_id))
 
-        next_landmark_idx = 0
-        landmark_step_count = 0
+        if active_scene_id != episode_scene_id:
+            print(f"Switch simulator scene: {active_scene_id} -> {episode_scene_id} for episode {episode_id}")
+            tool.machines_info = build_single_scene_machines_info(episode_scene_id)
+            tool.run_call()
+            active_scene_id = episode_scene_id
+
+        print(
+            f"================================ Start episode {episode_id} "
+            f"(scene {episode_scene_id}) =================================="
+        )
         instruction = navi_task["instruction"]['instruction_text']
         reference_path = navi_task['reference_path']
 
         step_size = 0
-        action_history = []
-
-        curr_pose = convert_airsim_pose(
-            navi_task["start_position"] + navi_task["start_rotation"][1:] + [navi_task["start_rotation"][0]]
-        )
+        message_history = []
         target_pose = convert_airsim_pose(navi_task["goals"][0]['position'] + [0, 0, 0, 1])
 
         tool.setPoses([[curr_pose]])
 
         data_dict = {
             "episode_id": episode_id,
+            "scene_id": episode_scene_id,
             "instruction": instruction,
             "gt_traj": [pose[:3] for pose in reference_path],
             "pred_traj": [],
@@ -247,8 +203,9 @@ def CityNavAgentMCTS(scene_id, split, data_dir="./data", max_step_size=200, reco
         }
 
         while step_size < max_step_size:
+            action_idx = step_size + 1
             try:
-                pano_obs, pano_pose = get_pano_observations(curr_pose, tool, scene_id=scene_id)
+                pano_obs, pano_pose = get_pano_observations(curr_pose, tool, scene_id=episode_scene_id)
                 pano_obs_imgs = [pano_obs[6][0], pano_obs[7][0], pano_obs[0][0], pano_obs[1][0], pano_obs[2][0]]
                 pano_obs_poses = [pano_pose[6], pano_pose[7], pano_pose[0], pano_pose[1], pano_pose[2]]
 
@@ -260,10 +217,12 @@ def CityNavAgentMCTS(scene_id, split, data_dir="./data", max_step_size=200, reco
                     cv2.imwrite(pano_obs_imgs_path[j], pano_obs_imgs[j])
             except Exception as e:
                 data_dict['pred_traj'].append(list(curr_pose.position))
-                print(f"Task idx: {i}. Step size: {step_size}. Success: False. Failed to get images. Exception: {e}")
+                print(
+                    f"Task idx: {i}. Action idx: {action_idx}. Step size: {step_size}. "
+                    f"Success: False. Failed to get images. Exception: {e}"
+                )
                 break
 
-            print("Qwen action loop, keep exploring ...")
             viewpoint_img_path = {
                 "left": pano_obs_imgs_path[0],
                 "slightly_left": pano_obs_imgs_path[1],
@@ -272,26 +231,16 @@ def CityNavAgentMCTS(scene_id, split, data_dir="./data", max_step_size=200, reco
                 "right": pano_obs_imgs_path[4],
             }
 
-            action_name, reason, raw_response = query_qwen_action(
+            action_name, reason, raw_response, message_history = query_qwen_action(
                 llm=llm,
                 instruction_text=instruction,
-                landmarks=landmarks,
-                next_landmark_idx=next_landmark_idx,
-                current_pose=curr_pose,
                 viewpoint_img_path=viewpoint_img_path,
-                action_history=action_history,
+                message_history=message_history,
             )
-            print(f"Qwen decision: {action_name}.")
-            print(f"Qwen reason: {reason}")
+            print(f"[Action {action_idx}] decision: {action_name}.")
+            print(f"[Action {action_idx}] reason: {reason}")
 
-            current_landmark = landmarks[min(next_landmark_idx, len(landmarks) - 1)]
-            landmark_step_count += 1
-            if should_advance_landmark(reason, current_landmark, landmark_step_count):
-                if next_landmark_idx < len(landmarks) - 1:
-                    next_landmark_idx += 1
-                    landmark_step_count = 0
-
-            if action_name == STOP_ACTION:
+            if action_name == "STOP":
                 if len(data_dict["pred_traj"]) == 0:
                     data_dict["pred_traj"].append(list(curr_pose.position))
                 break
@@ -300,7 +249,6 @@ def CityNavAgentMCTS(scene_id, split, data_dir="./data", max_step_size=200, reco
             curr_pose = new_pose
             tool.setPoses([[curr_pose]])
             step_size += 1
-            action_history.append(action_name)
 
             curr_pos = [curr_pose.position.x_val, curr_pose.position.y_val, curr_pose.position.z_val]
             curr_ori = list(airsim.to_eularian_angles(curr_pose.orientation))
@@ -326,47 +274,54 @@ def CityNavAgentMCTS(scene_id, split, data_dir="./data", max_step_size=200, reco
         predict_routes.append(data_dict)
 
         if record:
-            for pr in predict_routes:
-                pr.update({'final_pred_traj': pr['pred_traj_explore']})
-            with open(f'output/output_data_mcts_{scene_id}.json', 'w') as f:
+            with open('output/output_data_mcts.json', 'w') as f:
                 json.dump(predict_routes, f, indent=4)
 
+    print("=" * 30 + " FINAL METRICS " + "=" * 30)
     nav_evaluator.log_metrics()
+    print("=" * 75)
 
-
-def replay_path(trajectory_files, scene_id, img_type='rgb'):
-    machines_info_xxx = [
-        {
-            'MACHINE_IP': '127.0.0.1',
-            'SOCKET_PORT': 30000,
-            'MAX_SCENE_NUM': 8,
-            'open_scenes': [scene_id],
-        },
-    ]
-
-    tool = AirVLNSimulatorClientTool(machines_info=machines_info_xxx)
-    tool.run_call()
+def replay_path(trajectory_files, img_type='rgb', save_failed_demo=False):
+    tool = None
+    active_scene_id = None
 
     with open(trajectory_files, 'r') as f:
         meta_data = json.load(f)
 
     for i, traj_info in enumerate(meta_data):
         episode_id = traj_info['episode_id']
+        if not save_failed_demo and not traj_info['success']:
+            continue
+        traj_scene_id = traj_info.get('scene_id')
+        if traj_scene_id is None:
+            print(f"Missing scene_id for episode {episode_id}, skip replay")
+            continue
+        traj_scene_id = int(traj_scene_id)
+        pred_traj = None
+
+        if tool is None:
+            tool = AirVLNSimulatorClientTool(machines_info=build_single_scene_machines_info(traj_scene_id))
+
         try:
-            pred_traj = traj_info['final_pred_traj']
+            pred_traj = traj_info['pred_traj_explore']
         except Exception as e:
             print(e)
             continue
-        if not traj_info['success']:
-            continue
+
+        if active_scene_id != traj_scene_id:
+            print(f"Switch replay scene: {active_scene_id} -> {traj_scene_id} for episode {episode_id}")
+            tool.machines_info = build_single_scene_machines_info(traj_scene_id)
+            tool.run_call()
+            active_scene_id = traj_scene_id
+
         if len(pred_traj) > 2000:
             continue
 
-        save_dir_rgb = os.path.join(f"./output/video/{scene_id}", episode_id, 'rgb')
+        save_dir_rgb = os.path.join(f"./output/video/{traj_scene_id}", episode_id, 'rgb')
         os.makedirs(save_dir_rgb, exist_ok=True)
         print(f"image saved in :{save_dir_rgb}")
 
-        save_dir_dep = os.path.join(f"./output/video/{scene_id}", episode_id, 'dep')
+        save_dir_dep = os.path.join(f"./output/video/{traj_scene_id}", episode_id, 'dep')
         os.makedirs(save_dir_dep, exist_ok=True)
         print(f"depth saved in :{save_dir_dep}")
 
@@ -380,7 +335,7 @@ def replay_path(trajectory_files, scene_id, img_type='rgb'):
             tool.setPoses([[curr_pose]])
 
             try:
-                pano_obs, pano_pose = get_front_observations(curr_pose, tool, scene_id=scene_id)
+                pano_obs, pano_pose = get_front_observations(curr_pose, tool, scene_id=traj_scene_id)
                 pano_obs_imgs = pano_obs[0][0]
                 pano_obs_deps = pano_obs[0][1] * 300
 
@@ -400,11 +355,8 @@ def replay_path(trajectory_files, scene_id, img_type='rgb'):
             except Exception as e:
                 print(f"{e}, skip {episode_id}")
 
-
-def make_demo_video(data_root, env_id, episode_id):
-    data_dir = f"{data_root}/{env_id}/{episode_id}/rgb"
-    save_dir = f"{data_root}/{env_id}/{episode_id}"
-    traj_data_path = os.path.join('output', f'output_data_mcts_{env_id}.json')
+def make_demo_video(data_root, episode_id):
+    traj_data_path = os.path.join('output', 'output_data_mcts.json')
 
     tgt_traj = None
     with open(traj_data_path, 'r') as f:
@@ -414,6 +366,12 @@ def make_demo_video(data_root, env_id, episode_id):
             tgt_traj = out_traj
             break
 
+    if tgt_traj is None:
+        raise ValueError(f"Cannot find episode {episode_id} from {traj_data_path}")
+
+    scene_id = int(tgt_traj['scene_id'])
+    data_dir = f"{data_root}/{scene_id}/{episode_id}/rgb"
+    save_dir = f"{data_root}/{scene_id}/{episode_id}"
     instruction = tgt_traj['instruction']
     img_files = os.listdir(data_dir)
     sorted_img_files = sorted(img_files, key=lambda name: int(name.split('_')[-1].split('.')[0]))
@@ -435,13 +393,62 @@ def make_demo_video(data_root, env_id, episode_id):
     out.release()
     print("Video processing complete.")
 
+def setup_auto_log(split, model_name):
+    class _TeeStream:
+        def __init__(self, *streams):
+            self.streams = streams
+
+        def write(self, data):
+            for stream in self.streams:
+                stream.write(data)
+                stream.flush()
+            return len(data)
+
+        def flush(self):
+            for stream in self.streams:
+                stream.flush()
+
+    os.makedirs("output/logs", exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    safe_model_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", model_name)
+    log_path = os.path.join(
+        "output",
+        "logs",
+        f"mcts_{split}_{safe_model_name}_{timestamp}.log",
+    )
+    setup_auto_log.original_stdout = getattr(setup_auto_log, "original_stdout", sys.__stdout__)
+    setup_auto_log.original_stderr = getattr(setup_auto_log, "original_stderr", sys.__stderr__)
+    setup_auto_log.log_path = log_path
+    setup_auto_log.log_file = open(log_path, "w", buffering=1)
+    sys.stdout = _TeeStream(setup_auto_log.original_stdout, setup_auto_log.log_file)
+    sys.stderr = _TeeStream(setup_auto_log.original_stderr, setup_auto_log.log_file)
+    print(f"Auto log file: {log_path}")
+    return log_path
 
 if __name__ == '__main__':
-    env_id = 3
     split = "val_seen"
     save_demo = True
+    save_failed_demo = False
+    data_dir = os.path.join("..", "DATA", "data", "aerialvln-slim")
+    model_name = "qwen3-max"
+    max_episodes = 0
 
-    CityNavAgentMCTS(env_id, split, max_step_size=60, record=save_demo)
+    setup_auto_log(split, model_name)
+    CityNavAgentMCTS(
+        split,
+        data_dir=data_dir,
+        max_step_size=200,
+        record=save_demo,
+        model_name=model_name,
+        max_episodes=max_episodes,
+    )
     if save_demo:
-        replay_path(f"./output/output_data_mcts_{env_id}.json", env_id, img_type='rgb')
-        make_demo_video('./output/video', env_id=env_id, episode_id='3IRIK4HM3JIZ640FRHTYZU0EJ9Y6CH')
+        output_data_path = "./output/output_data_mcts.json"
+        replay_path(output_data_path, img_type='rgb', save_failed_demo=save_failed_demo)
+
+        with open(output_data_path, 'r') as f:
+            output_trajs = json.load(f)
+
+        for out_traj in output_trajs:
+            if save_failed_demo or out_traj.get('success'):
+                make_demo_video('./output/video', episode_id=out_traj['episode_id'])

@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 def find_closest_node(graph, point, thresh=5, return_dist=False):
     min_distance = float('inf')
     closest_node = None
-    point = np.array(point)
+    point = np.array(point[:3]) if len(point) > 3 else np.array(point)
 
     for node, data in graph.nodes(data=True):
         n_pos = np.array(data['pos'])

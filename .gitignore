@@ -37,6 +37,7 @@ secret/
 
 weights/
 output/
+obs_imgs/
 
 memory/KG/*
 memory/mem/*

@@ -236,51 +236,66 @@ def pid_exists(pid) -> bool:
 
 
 def FromPortGetPid(port: int):
-    subprocess_execute = "netstat -nlp | grep {}".format(
-        port,
-    )
+    commands = [
+        f"ss -ltnp '( sport = :{port} )'",
+        f"lsof -ti tcp:{port} -sTCP:LISTEN",
+        f"fuser -n tcp {port}",
+    ]
 
-    try:
-        p = subprocess.Popen(
-            subprocess_execute,
-            stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            shell=True,
-        )
-    except Exception as e:
-        print(
-            "{}\t{}\t{}".format(
-                str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
-                'FromPortGetPid',
-                e,
+    for subprocess_execute in commands:
+        try:
+            p = subprocess.Popen(
+                subprocess_execute,
+                stdin=None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=True,
             )
-        )
-        return None
-    except:
-        return None
+        except Exception as e:
+            print(
+                "{}\t{}\t{}".format(
+                    str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())),
+                    'FromPortGetPid',
+                    e,
+                )
+            )
+            return None
+        except:
+            return None
 
-    pid = None
-    for line in iter(p.stdout.readline, b''):
-        line = str(line, encoding="utf-8")
-        if 'tcp' in line:
-            pid = line.strip().split()[-1].split('/')[0]
-            try:
-                pid = int(pid)
-            except:
-                pid = None
-            break
+        output_lines = []
+        for line in iter(p.stdout.readline, b''):
+            output_lines.append(str(line, encoding="utf-8").strip())
 
-    try:
-        # os.system(("kill -9 {}".format(p.pid)))
-        os.kill(p.pid, signal.SIGKILL)
-    except:
-        pass
+        try:
+            os.kill(p.pid, signal.SIGKILL)
+        except:
+            pass
 
-    return pid
+        for line in output_lines:
+            if "pid=" in line:
+                pid_text = line.split("pid=")[-1].split(",")[0].split(")")[0]
+                try:
+                    return int(pid_text)
+                except:
+                    pass
+
+            tokens = [token for token in line.replace(",", " ").split() if token.isdigit()]
+            for token in tokens:
+                try:
+                    return int(token)
+                except:
+                    pass
+
+    return None
 
 
-def KillPid(pid) -> None:
+def KillPid(pid, port=None) -> None:
     if pid is None or not isinstance(pid, int):
-        print('pid is not int')
+        if port is not None:
+            print(f'no listener found on port {port}')
+        else:
+            print('no listener found')
         return
 
     while pid_exists(pid):
@@ -299,7 +314,7 @@ def KillPorts(ports) -> None:
 
     def _kill_port(index, port):
         pid = FromPortGetPid(port)
-        KillPid(pid)
+        KillPid(pid, port=port)
 
     for index, port in enumerate(ports):
         thread = threading.Thread(target=_kill_port, args=(index, port))

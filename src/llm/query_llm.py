@@ -231,6 +231,8 @@ class OpenAI_LLM_v1(LLM):
 class OpenAI_LLM_v2(LLM):
     def __init__(self, model_name, api_key, client_type="openai", logit_bias=None, max_tokens=64, finish_reasons=None, **kwargs):
         base_url = kwargs.pop("base_url", None)
+        extra_body = kwargs.pop("extra_body", None)
+        enable_thinking = kwargs.pop("enable_thinking", None)
 
         if client_type == "openai":
             client_kwargs = {"api_key": api_key}
@@ -249,49 +251,62 @@ class OpenAI_LLM_v2(LLM):
         if finish_reasons is None:
             self.finish_reasons = ['stop', 'length']
 
+        self.extra_body = dict(extra_body) if extra_body is not None else {}
+        if enable_thinking is not None:
+            self.extra_body["enable_thinking"] = enable_thinking
+
         super().__init__(api_key, model_name, max_tokens, **kwargs)
 
     def encode_image(self, image_path):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
-    def query_viewpoint_api(self, prompt, image_paths=None, show_response=True):
-        def query_func():
-            content_block = []
-            if image_paths is not None:
-                for viewpoint, img_p in image_paths.items():
-                    content_block.append({
-                        "type": "text",
-                        "text": f"{viewpoint} image: "
-                    })
-                    content_block.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{self.encode_image(img_p)}"
-                        }
-                    })
-            content_block.append({
-                "type": "text",
-                "text": f"{prompt}"
-            })
-
-            completion = self.client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": content_block
+    def build_viewpoint_user_message(self, prompt, image_paths=None):
+        content_block = []
+        if image_paths is not None:
+            for viewpoint, img_p in image_paths.items():
+                content_block.append({
+                    "type": "text",
+                    "text": f"{viewpoint} image: "
+                })
+                content_block.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{self.encode_image(img_p)}"
                     }
-                ],
-                model=self.model_name,
-            )
+                })
+        content_block.append({
+            "type": "text",
+            "text": f"{prompt}"
+        })
+        return {
+            "role": "user",
+            "content": content_block
+        }
+
+    def query_viewpoint_api(self, prompt, image_paths=None, message_history=None, show_response=True, return_message_history=False):
+        def query_func():
+            user_message = self.build_viewpoint_user_message(prompt, image_paths=image_paths)
+            messages = list(message_history) if message_history is not None else []
+            messages.append(user_message)
+
+            completion_kwargs = {
+                "messages": messages,
+                "model": self.model_name,
+            }
+            if self.extra_body:
+                completion_kwargs["extra_body"] = self.extra_body
+
+            completion = self.client.chat.completions.create(**completion_kwargs)
 
             message = completion.choices[0].message
             content = unicodedata.normalize('NFKC', message.content)
 
-            return content
+            updated_messages = messages + [{"role": "assistant", "content": content}]
+            return content, updated_messages
 
         try:
-            response = query_func()
+            response, updated_messages = query_func()
         except Exception as e:
             print(e)
             # self.save_cache()
@@ -304,6 +319,8 @@ class OpenAI_LLM_v2(LLM):
             print(response)
             print('')
 
+        if return_message_history:
+            return response, updated_messages
         return response
 
     def query_api(self, prompt, image_path=None,system=None, show_response=True):
@@ -326,12 +343,16 @@ class OpenAI_LLM_v2(LLM):
                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
                 })
 
-            completion = self.client.chat.completions.create(
-                messages=[
+            completion_kwargs = {
+                "messages": [
                     query_messages
                 ],
-                model=self.model_name,
-            )
+                "model": self.model_name,
+            }
+            if self.extra_body:
+                completion_kwargs["extra_body"] = self.extra_body
+
+            completion = self.client.chat.completions.create(**completion_kwargs)
 
             message = completion.choices[0].message
             content = unicodedata.normalize('NFKC', message.content)
