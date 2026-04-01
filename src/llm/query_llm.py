@@ -261,37 +261,33 @@ class OpenAI_LLM_v2(LLM):
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
 
-    def build_viewpoint_user_message(self, prompt, image_paths=None):
-        content_block = []
-        if image_paths is not None:
-            for viewpoint, img_p in image_paths.items():
-                content_block.append({
-                    "type": "text",
-                    "text": f"{viewpoint} image: "
-                })
-                content_block.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{self.encode_image(img_p)}"
-                    }
-                })
-        content_block.append({
-            "type": "text",
-            "text": f"{prompt}"
-        })
-        return {
-            "role": "user",
-            "content": content_block
-        }
-
-    def query_viewpoint_api(self, prompt, image_paths=None, message_history=None, show_response=True, return_message_history=False):
+    def query_viewpoint_api(self, prompt, image_paths=None, show_response=True):
         def query_func():
-            user_message = self.build_viewpoint_user_message(prompt, image_paths=image_paths)
-            messages = list(message_history) if message_history is not None else []
-            messages.append(user_message)
+            content_block = []
+            if image_paths is not None:
+                for viewpoint, img_p in image_paths.items():
+                    content_block.append({
+                        "type": "text",
+                        "text": f"{viewpoint} image: "
+                    })
+                    content_block.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{self.encode_image(img_p)}"
+                        }
+                    })
+            content_block.append({
+                "type": "text",
+                "text": f"{prompt}"
+            })
 
             completion_kwargs = {
-                "messages": messages,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": content_block
+                    }
+                ],
                 "model": self.model_name,
             }
             if self.extra_body:
@@ -302,11 +298,10 @@ class OpenAI_LLM_v2(LLM):
             message = completion.choices[0].message
             content = unicodedata.normalize('NFKC', message.content)
 
-            updated_messages = messages + [{"role": "assistant", "content": content}]
-            return content, updated_messages
+            return content
 
         try:
-            response, updated_messages = query_func()
+            response = query_func()
         except Exception as e:
             print(e)
             # self.save_cache()
@@ -319,8 +314,6 @@ class OpenAI_LLM_v2(LLM):
             print(response)
             print('')
 
-        if return_message_history:
-            return response, updated_messages
         return response
 
     def query_api(self, prompt, image_path=None,system=None, show_response=True):

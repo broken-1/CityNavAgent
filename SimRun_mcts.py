@@ -128,17 +128,15 @@ Return JSON only:
 """.strip()
     return prompt
 
-def query_qwen_action(llm, instruction_text, viewpoint_img_path, message_history):
+def query_qwen_action(llm, instruction_text, viewpoint_img_path):
     prompt = build_qwen_action_prompt(instruction_text)
-    raw_response, updated_message_history = llm.query_viewpoint_api(
+    raw_response = llm.query_viewpoint_api(
         prompt,
         viewpoint_img_path,
-        message_history=message_history,
         show_response=False,
-        return_message_history=True,
     )
     action_name, reason, cleaned_response = parse_action_response(raw_response)
-    return action_name, reason, cleaned_response, updated_message_history
+    return action_name, reason, cleaned_response
 
 def CityNavAgentMCTS(split, data_dir, max_step_size, record, model_name, max_episodes=0):
     os.makedirs("obs_imgs", exist_ok=True)
@@ -188,7 +186,6 @@ def CityNavAgentMCTS(split, data_dir, max_step_size, record, model_name, max_epi
         reference_path = navi_task['reference_path']
 
         step_size = 0
-        message_history = []
         target_pose = convert_airsim_pose(navi_task["goals"][0]['position'] + [0, 0, 0, 1])
 
         tool.setPoses([[curr_pose]])
@@ -231,11 +228,10 @@ def CityNavAgentMCTS(split, data_dir, max_step_size, record, model_name, max_epi
                 "right": pano_obs_imgs_path[4],
             }
 
-            action_name, reason, raw_response, message_history = query_qwen_action(
+            action_name, reason, raw_response = query_qwen_action(
                 llm=llm,
                 instruction_text=instruction,
                 viewpoint_img_path=viewpoint_img_path,
-                message_history=message_history,
             )
             print(f"[Action {action_idx}] decision: {action_name}.")
             print(f"[Action {action_idx}] reason: {reason}")
@@ -430,7 +426,10 @@ if __name__ == '__main__':
     save_demo = True
     save_failed_demo = False
     data_dir = os.path.join("..", "DATA", "data", "aerialvln-slim")
-    model_name = "qwen3-max"
+    # model_name = "qwen3-max"
+    model_name = "qwen3-vl-plus"
+    # model_name = "qwen3.5-omni-plus"
+    # model_name = "qwen3.5-plus"
     max_episodes = 0
 
     setup_auto_log(split, model_name)
