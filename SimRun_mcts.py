@@ -342,6 +342,9 @@ class SearchNode:
     visit_count: int = 0
     value_sum: float = 0.0
     leaf_eval: dict = None
+    candidate_actions: list = field(default_factory=list)
+    candidate_priors: dict = field(default_factory=dict)
+    candidate_raw: str = ""
 
     @property
     def mean_value(self):
@@ -397,6 +400,31 @@ def evaluate_leaf_node(llm, tool, scene_id, root_pose, instruction_text, node):
     return prm_eval["score"] / 100.0
 
 
+def ensure_node_candidates(llm, tool, scene_id, root_pose, instruction_text,
+                           node):
+    if node.candidate_actions:
+        return
+
+    if node.parent is None:
+        raise ValueError("Root node candidates should be initialized upfront.")
+
+    tool.setPoses([[node.pose]])
+    viewpoint_img_path = capture_five_view_images(node.pose, tool, scene_id)
+    node_candidates, candidate_raw = query_qwen_action_candidates(
+        llm=llm,
+        instruction_text=instruction_text,
+        viewpoint_img_path=viewpoint_img_path,
+    )
+    tool.setPoses([[root_pose]])
+
+    node.candidate_actions = [item["action"] for item in node_candidates]
+    node.candidate_priors = {
+        item["action"]: max(0.01, item["score"] / 100.0)
+        for item in node_candidates
+    }
+    node.candidate_raw = candidate_raw
+
+
 def run_mcts_search(llm, tool, scene_id, instruction_text, root_pose,
                     root_candidates):
     root = SearchNode(
@@ -405,12 +433,13 @@ def run_mcts_search(llm, tool, scene_id, instruction_text, root_pose,
         action_prefix=[],
         prior_score=1.0,
         parent=None,
+        candidate_actions=[item["action"] for item in root_candidates],
+        candidate_priors={
+            item["action"]: max(0.01, item["score"] / 100.0)
+            for item in root_candidates
+        },
+        candidate_raw="",
     )
-    candidate_actions = [item["action"] for item in root_candidates]
-    candidate_priors = {
-        item["action"]: max(0.01, item["score"] / 100.0)
-        for item in root_candidates
-    }
 
     simulation_logs = []
     for sim_idx in range(NUM_SIMULATIONS):
@@ -418,13 +447,21 @@ def run_mcts_search(llm, tool, scene_id, instruction_text, root_pose,
         path = [root]
 
         while len(node.action_prefix) < SEARCH_DEPTH:
+            ensure_node_candidates(
+                llm=llm,
+                tool=tool,
+                scene_id=scene_id,
+                root_pose=root_pose,
+                instruction_text=instruction_text,
+                node=node,
+            )
             unexpanded = [
-                action for action in candidate_actions
+                action for action in node.candidate_actions
                 if action not in node.children
             ]
             if unexpanded:
                 action = unexpanded[0]
-                node = expand_child(node, action, candidate_priors[action])
+                node = expand_child(node, action, node.candidate_priors[action])
                 path.append(node)
                 break
 
